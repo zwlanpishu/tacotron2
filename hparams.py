@@ -10,7 +10,7 @@ def create_hparams(hparams_string=None, verbose=False):
         # Experiment Parameters        #
         ################################
         epochs=500,
-        iters_per_checkpoint=1000,
+        iters_per_checkpoint=500,
         seed=1234,
         dynamic_loss_scaling=True,
         fp16_run=False,
@@ -25,9 +25,10 @@ def create_hparams(hparams_string=None, verbose=False):
         # Data Parameters             #
         ################################
         load_mel_from_disk=False,
-        training_files='filelists/ljs_audio_text_train_filelist.txt',
-        validation_files='filelists/ljs_audio_text_val_filelist.txt',
-        text_cleaners=['english_cleaners'],
+        training_files="filelists/ljs_audio_text_train_filelist.txt",
+        validation_files="filelists/ljs_audio_text_val_filelist.txt",
+        test_files="filelists/ljs_audio_text_test_filelist.txt",
+        text_cleaners=["english_cleaners"],
 
         ################################
         # Audio Parameters             #
@@ -53,16 +54,14 @@ def create_hparams(hparams_string=None, verbose=False):
         encoder_embedding_dim=512,
 
         # Decoder parameters
-        n_frames_per_step=1,  # currently only 1 is supported
+        n_frames_per_step=1,  # current support only with no mask_padding
         decoder_rnn_dim=1024,
         prenet_dim=256,
         max_decoder_steps=1000,
         gate_threshold=0.5,
-        p_attention_dropout=0.1,
-        p_decoder_dropout=0.1,
 
         # Attention parameters
-        attention_rnn_dim=1024,
+        attention_rnn_dim=512,
         attention_dim=128,
 
         # Location Layer parameters
@@ -81,15 +80,15 @@ def create_hparams(hparams_string=None, verbose=False):
         learning_rate=1e-3,
         weight_decay=1e-6,
         grad_clip_thresh=1.0,
-        batch_size=64,
-        mask_padding=True  # set model's padded outputs to padded values
+        batch_size=32,
+        mask_padding=False  # set False for supporting n frames per step
     )
 
     if hparams_string:
-        tf.logging.info('Parsing command line hparams: %s', hparams_string)
+        tf.logging.info("Parsing command line hparams: %s", hparams_string)
         hparams.parse(hparams_string)
 
     if verbose:
-        tf.logging.info('Final parsed hparams: %s', hparams.values())
+        tf.logging.info("Final parsed hparams: %s", hparams.values())
 
     return hparams

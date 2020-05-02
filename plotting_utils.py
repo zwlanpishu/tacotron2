@@ -18,7 +18,7 @@ def plot_alignment_to_numpy(alignment, info=None):
     fig.colorbar(im, ax=ax)
     xlabel = 'Decoder timestep'
     if info is not None:
-        xlabel += '\n\n' + info
+        xlabel += '\n\n' + str(info)
     plt.xlabel(xlabel)
     plt.ylabel('Encoder timestep')
     plt.tight_layout()

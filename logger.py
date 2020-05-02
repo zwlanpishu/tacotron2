@@ -56,3 +56,6 @@ class Tacotron2Logger(SummaryWriter):
             iteration,
             dataformats="HWC",
         )
+
+    def log_assist(self, string_assist, value_assist, iteration):
+        self.add_scalar(string_assist, value_assist, iteration)

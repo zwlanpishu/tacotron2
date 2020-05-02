@@ -5,6 +5,7 @@ import math
 from numpy import finfo
 
 import torch
+import torch.nn as nn
 from distributed import apply_gradient_allreduce
 import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
@@ -15,6 +16,22 @@ from data_utils import TextMelLoader, TextMelCollate
 from loss_function import Tacotron2Loss
 from logger import Tacotron2Logger
 from hparams import create_hparams
+
+
+def lr_decay(learning_rate, iteration):
+    if iteration < 30000:
+        lr = learning_rate
+    elif iteration < 60000:
+        lr = 5e-4
+    elif iteration < 90000:
+        lr = 3e-4
+    elif iteration < 120000:
+        lr = 1e-4
+    else:
+        lr = 5e-5
+
+    # lr = learning_rate * 0.96 ** int(iteration / 1000)
+    return lr
 
 
 def reduce_tensor(tensor, n_gpus):
@@ -71,10 +88,11 @@ def prepare_dataloaders(hparams):
 
 def prepare_directories_and_logger(output_directory, log_directory, rank):
     if rank == 0:
-        if not os.path.isdir(output_directory):
-            os.makedirs(output_directory)
-            os.chmod(output_directory, 0o775)
-        logger = Tacotron2Logger(os.path.join(output_directory, log_directory))
+        os.makedirs(output_directory, exist_ok=True)
+        os.chmod(output_directory, 0o775)
+        os.makedirs(log_directory, exist_ok=True)
+        os.chmod(log_directory, 0o775)
+        logger = Tacotron2Logger(log_directory)
     else:
         logger = None
     return logger
@@ -143,6 +161,7 @@ def save_checkpoint(model, optimizer, learning_rate, iteration, filepath):
 def validate(
     model,
     criterion,
+    att_criterion,
     valset,
     iteration,
     batch_size,
@@ -167,21 +186,35 @@ def validate(
         )
 
         val_loss = 0.0
+        val_loss_f = 0.0
+        val_att = 0.0
         for i, batch in enumerate(val_loader):
             x, y = model.parse_batch(batch)
-            y_pred = model(x)
+            y_pred_list = model(x, teacher=True)
+            y_pred = y_pred_list[:-1]
+            att_t = y_pred_list[-1]
             loss = criterion(y_pred, y)
             if distributed_run:
                 reduced_val_loss = reduce_tensor(loss.data, n_gpus).item()
             else:
                 reduced_val_loss = loss.item()
+
+            y_pred_list_f = model(x, teacher=False)
+            y_pred_f = y_pred_list_f[:-1]
+            att_f = y_pred_list_f[-1]
+            loss_f = criterion(y_pred_f, y)
+            loss_att = att_criterion(att_f, att_t.detach())
+
             val_loss += reduced_val_loss
+            val_loss_f += loss_f.item()
+            val_att += loss_att.item()
+
         val_loss = val_loss / (i + 1)
+        val_loss_f = val_loss_f / (i + 1)
+        val_att = val_att / (i + 1)
 
     model.train()
-    if rank == 0:
-        print("Validation loss {}: {:9f}  ".format(iteration, val_loss))
-        logger.log_validation(val_loss, model, y, y_pred, iteration)
+    return val_loss, val_loss_f, val_att
 
 
 def train(
@@ -225,7 +258,8 @@ def train(
     if hparams.distributed_run:
         model = apply_gradient_allreduce(model)
 
-    criterion = Tacotron2Loss()
+    criterion = Tacotron2Loss().cuda()
+    att_criterion = nn.MSELoss().cuda()
 
     logger = prepare_directories_and_logger(
         output_directory, log_directory, rank
@@ -262,9 +296,11 @@ def train(
 
             model.zero_grad()
             x, y = model.parse_batch(batch)
-            y_pred = model(x)
+            y_pred_t_list = model(x, teacher=True)
+            y_pred_t = y_pred_t_list[:-1]
+            att_reg_t = y_pred_t_list[-1]
+            loss = criterion(y_pred_t, y)
 
-            loss = criterion(y_pred, y)
             if hparams.distributed_run:
                 reduced_loss = reduce_tensor(loss.data, n_gpus).item()
             else:
@@ -274,6 +310,13 @@ def train(
                     scaled_loss.backward()
             else:
                 loss.backward()
+
+            # add a new free run turn
+            y_pred_f_list = model(x, teacher=False)
+            y_pred_f = y_pred_f_list[:-1]
+            att_reg_f = y_pred_f_list[-1]
+            loss_att = att_criterion(att_reg_f, att_reg_t.detach())
+            loss_att.backward()
 
             if hparams.fp16_run:
                 grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -297,13 +340,17 @@ def train(
                 logger.log_training(
                     reduced_loss, grad_norm, learning_rate, duration, iteration
                 )
+                logger.log_assist(
+                    "loss for tf and fr", loss_att.item(), iteration
+                )
 
             if not is_overflow and (
                 iteration % hparams.iters_per_checkpoint == 0
             ):
-                validate(
+                reduced_val_loss, val_loss_f, val_att = validate(
                     model,
                     criterion,
+                    att_criterion,
                     valset,
                     iteration,
                     hparams.batch_size,
@@ -313,7 +360,18 @@ def train(
                     hparams.distributed_run,
                     rank,
                 )
+
                 if rank == 0:
+                    print(
+                        "Validation loss {}: {:9f}  ".format(
+                            iteration, reduced_val_loss
+                        )
+                    )
+                    logger.log_validation(
+                        reduced_val_loss, model, y, y_pred_t, iteration
+                    )
+                    logger.log_assist("val loss for fr", val_loss_f, iteration)
+                    logger.log_assist("val att loss", val_att, iteration)
                     checkpoint_path = os.path.join(
                         output_directory, "checkpoint_{}".format(iteration)
                     )
@@ -334,12 +392,14 @@ if __name__ == "__main__":
         "-o",
         "--output_directory",
         type=str,
+        default="/home/server/checkpoints/tacotron2_gan/exp",
         help="directory to save checkpoints",
     )
     parser.add_argument(
         "-l",
         "--log_directory",
         type=str,
+        default="/home/server/checkpoints/tacotron2_gan/log/exp",
         help="directory to save tensorboard logs",
     )
     parser.add_argument(
@@ -401,4 +461,3 @@ if __name__ == "__main__":
         args.group_name,
         hparams,
     )
-
