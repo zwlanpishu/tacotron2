@@ -292,7 +292,7 @@ def train(
         for i, batch in enumerate(train_loader):
             start = time.perf_counter()
             for param_group in optimizer.param_groups:
-                param_group["lr"] = learning_rate
+                param_group["lr"] = lr_decay(learning_rate, iteration)
 
             model.zero_grad()
             x, y = model.parse_batch(batch)
@@ -392,14 +392,14 @@ if __name__ == "__main__":
         "-o",
         "--output_directory",
         type=str,
-        default="/home/server/checkpoints/tacotron2_gan/exp",
+        default="/home/xdjf/checkpoints/tacotron2/exp1",
         help="directory to save checkpoints",
     )
     parser.add_argument(
         "-l",
         "--log_directory",
         type=str,
-        default="/home/server/checkpoints/tacotron2_gan/log/exp",
+        default="/home/xdjf/checkpoints/tacotron2/log/exp1",
         help="directory to save tensorboard logs",
     )
     parser.add_argument(

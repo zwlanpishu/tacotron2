@@ -278,8 +278,6 @@ class Decoder(nn.Module):
         self.prenet_dim = hparams.prenet_dim
         self.max_decoder_steps = hparams.max_decoder_steps
         self.gate_threshold = hparams.gate_threshold
-        self.p_attention_dropout = hparams.p_attention_dropout
-        self.p_decoder_dropout = hparams.p_decoder_dropout
 
         self.prenet = Prenet(
             hparams.n_mel_channels * hparams.n_frames_per_step,
@@ -300,8 +298,7 @@ class Decoder(nn.Module):
 
         self.decoder_rnn = nn.LSTMCell(
             hparams.prenet_dim + hparams.encoder_embedding_dim,
-            hparams.decoder_rnn_dim,
-            2,
+            hparams.decoder_rnn_dim
         )
 
         self.linear_projection = LinearNorm(
