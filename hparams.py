@@ -54,7 +54,7 @@ def create_hparams(hparams_string=None, verbose=False):
         encoder_embedding_dim=512,
 
         # Decoder parameters
-        n_frames_per_step=3,  # current support only with no mask_padding
+        n_frames_per_step=1,  # current support only with no mask_padding
         decoder_rnn_dim=1024,
         prenet_dim=256,
         max_decoder_steps=1000,

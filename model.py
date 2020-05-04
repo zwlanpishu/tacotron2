@@ -571,7 +571,8 @@ class Decoder(nn.Module):
             att_regulars += [att_regular]
 
             eos = F.sigmoid(gate_output).detach().cpu().numpy()
-            if np.all(eos >= self.gate_threshold):
+
+            if True in (eos >= self.gate_threshold):
                 break
             elif len(mel_outputs) == self.max_decoder_steps:
                 print("Warning! Reached max decoder steps")
@@ -607,9 +608,9 @@ class Tacotron2(nn.Module):
         self.embedding = nn.Embedding(
             hparams.n_symbols, hparams.symbols_embedding_dim, max_norm=1.0
         )
-        std = sqrt(2.0 / (hparams.n_symbols + hparams.symbols_embedding_dim))
-        val = sqrt(3.0) * std  # uniform bounds for std
-        self.embedding.weight.data.uniform_(-val, val)
+        # std = sqrt(2.0 / (hparams.n_symbols + hparams.symbols_embedding_dim))
+        # val = sqrt(3.0) * std  # uniform bounds for std
+        # self.embedding.weight.data.uniform_(-val, val)
         self.encoder = Encoder(hparams)
         self.decoder = Decoder(hparams)
         self.postnet = Postnet(hparams)
@@ -636,15 +637,18 @@ class Tacotron2(nn.Module):
 
     def parse_output(self, outputs, output_lengths=None):
         if self.mask_padding and output_lengths is not None:
-            mask = ~get_mask_from_lengths(
-                output_lengths + 1
-            )  # +1 <stop> token
+            mask = ~get_mask_from_lengths(output_lengths + 1)
             mask = mask.expand(self.n_mel_channels, mask.size(0), mask.size(1))
             mask = mask.permute(1, 0, 2)
 
-            outputs[0].data.masked_fill_(mask, 0.0)
-            outputs[1].data.masked_fill_(mask, 0.0)
-            # outputs[2].data.masked_fill_(mask[:, 0, :], 1e3)  # gate energies
+            B, C, T = outputs.size()
+            T_m = mask.size(2)
+            mask_padded = mask.new_ones(B, C, T)
+            mask_padded[:, :, :T_m] = mask
+
+            outputs[0].data.masked_fill_(mask_padded, 0.0)
+            outputs[1].data.masked_fill_(mask_padded, 0.0)
+            outputs[2].data.masked_fill_(mask_padded[:, 0, :], 1e3)
 
         return outputs
 

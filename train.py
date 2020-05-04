@@ -161,7 +161,6 @@ def save_checkpoint(model, optimizer, learning_rate, iteration, filepath):
 def validate(
     model,
     criterion,
-    att_criterion,
     valset,
     iteration,
     batch_size,
@@ -186,35 +185,21 @@ def validate(
         )
 
         val_loss = 0.0
-        val_loss_f = 0.0
-        val_att = 0.0
         for i, batch in enumerate(val_loader):
             x, y = model.parse_batch(batch)
             y_pred_list = model(x, teacher=True)
             y_pred = y_pred_list[:-1]
-            att_t = y_pred_list[-1]
             loss = criterion(y_pred, y)
             if distributed_run:
                 reduced_val_loss = reduce_tensor(loss.data, n_gpus).item()
             else:
                 reduced_val_loss = loss.item()
-
-            y_pred_list_f = model(x, teacher=False)
-            y_pred_f = y_pred_list_f[:-1]
-            att_f = y_pred_list_f[-1]
-            loss_f = criterion(y_pred_f, y)
-            loss_att = att_criterion(att_f, att_t.detach())
-
             val_loss += reduced_val_loss
-            val_loss_f += loss_f.item()
-            val_att += loss_att.item()
 
         val_loss = val_loss / (i + 1)
-        val_loss_f = val_loss_f / (i + 1)
-        val_att = val_att / (i + 1)
 
     model.train()
-    return val_loss, val_loss_f, val_att
+    return val_loss
 
 
 def train(
@@ -259,7 +244,6 @@ def train(
         model = apply_gradient_allreduce(model)
 
     criterion = Tacotron2Loss().cuda()
-    att_criterion = nn.MSELoss().cuda()
 
     logger = prepare_directories_and_logger(
         output_directory, log_directory, rank
@@ -291,14 +275,14 @@ def train(
         print("Epoch: {}".format(epoch))
         for i, batch in enumerate(train_loader):
             start = time.perf_counter()
+            learning_rate = lr_decay(hparams.learning_rate, iteration)
             for param_group in optimizer.param_groups:
-                param_group["lr"] = lr_decay(learning_rate, iteration)
+                param_group["lr"] = learning_rate
 
             model.zero_grad()
             x, y = model.parse_batch(batch)
             y_pred_t_list = model(x, teacher=True)
             y_pred_t = y_pred_t_list[:-1]
-            att_reg_t = y_pred_t_list[-1]
             loss = criterion(y_pred_t, y)
 
             if hparams.distributed_run:
@@ -310,13 +294,6 @@ def train(
                     scaled_loss.backward()
             else:
                 loss.backward()
-
-            # add a new free run turn
-            y_pred_f_list = model(x, teacher=False)
-            y_pred_f = y_pred_f_list[:-1]
-            att_reg_f = y_pred_f_list[-1]
-            loss_att = att_criterion(att_reg_f, att_reg_t.detach())
-            loss_att.backward()
 
             if hparams.fp16_run:
                 grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -340,9 +317,6 @@ def train(
                 logger.log_training(
                     reduced_loss, grad_norm, learning_rate, duration, iteration
                 )
-                logger.log_assist(
-                    "loss for tf and fr", loss_att.item(), iteration
-                )
 
             if not is_overflow and (
                 iteration % hparams.iters_per_checkpoint == 0
@@ -350,7 +324,6 @@ def train(
                 reduced_val_loss, val_loss_f, val_att = validate(
                     model,
                     criterion,
-                    att_criterion,
                     valset,
                     iteration,
                     hparams.batch_size,
@@ -370,8 +343,6 @@ def train(
                     logger.log_validation(
                         reduced_val_loss, model, y, y_pred_t, iteration
                     )
-                    logger.log_assist("val loss for fr", val_loss_f, iteration)
-                    logger.log_assist("val att loss", val_att, iteration)
                     checkpoint_path = os.path.join(
                         output_directory, "checkpoint_{}".format(iteration)
                     )
