@@ -321,7 +321,7 @@ def train(
             if not is_overflow and (
                 iteration % hparams.iters_per_checkpoint == 0
             ):
-                reduced_val_loss, val_loss_f, val_att = validate(
+                reduced_val_loss = validate(
                     model,
                     criterion,
                     valset,

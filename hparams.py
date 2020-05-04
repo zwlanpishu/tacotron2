@@ -81,7 +81,7 @@ def create_hparams(hparams_string=None, verbose=False):
         weight_decay=1e-6,
         grad_clip_thresh=1.0,
         batch_size=32,
-        mask_padding=False  # set False for supporting n frames per step
+        mask_padding=True
     )
 
     if hparams_string:
