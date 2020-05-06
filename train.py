@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 
 from model import Tacotron2
 from data_utils import TextMelLoader, TextMelCollate
-from loss_function import Tacotron2Loss
+from loss_function import Tacotron2LossRight, Tacotron2LossLeft
 from logger import Tacotron2Logger
 from hparams import create_hparams
 
@@ -64,7 +64,7 @@ def prepare_dataloaders(hparams):
     # Get data, data loaders and collate function ready
     trainset = TextMelLoader(hparams.training_files, hparams)
     valset = TextMelLoader(hparams.validation_files, hparams)
-    collate_fn = TextMelCollate(hparams.n_frames_per_step)
+    collate_fn = TextMelCollate(hparams.n_frames_left, hparams.n_frames_right)
 
     if hparams.distributed_run:
         train_sampler = DistributedSampler(trainset)
@@ -160,15 +160,13 @@ def save_checkpoint(model, optimizer, learning_rate, iteration, filepath):
 
 def validate(
     model,
-    criterion,
+    criterion_left,
+    criterion_right,
     valset,
-    iteration,
     batch_size,
     n_gpus,
     collate_fn,
-    logger,
     distributed_run,
-    rank,
 ):
     """Handles all the validation scoring and printing"""
     model.eval()
@@ -185,21 +183,33 @@ def validate(
         )
 
         val_loss = 0.0
+        val_loss_left = 0.0
+        val_loss_right = 0.0
         for i, batch in enumerate(val_loader):
             x, y = model.parse_batch(batch)
-            y_pred_list = model(x, teacher=True)
-            y_pred = y_pred_list[:-1]
-            loss = criterion(y_pred, y)
+            [outs_left, outs_right] = model(x, teacher=True)
+            y_pred_left = outs_left[0:2]
+            y_pred_right = outs_right[0:3]
+
+            loss_left = criterion_left(y_pred_left, y)
+            loss_right = criterion_right(y_pred_right, y)
+            loss = loss_left + loss_right
+
             if distributed_run:
                 reduced_val_loss = reduce_tensor(loss.data, n_gpus).item()
             else:
                 reduced_val_loss = loss.item()
+
             val_loss += reduced_val_loss
+            val_loss_left += loss_left.item()
+            val_loss_right += loss_right.item()
 
         val_loss = val_loss / (i + 1)
+        val_loss_left = val_loss_left / (i + 1)
+        val_loss_right = val_loss_right / (i + 1)
 
     model.train()
-    return val_loss
+    return val_loss, val_loss_left, val_loss_right
 
 
 def train(
@@ -218,11 +228,12 @@ def train(
     ------
     output_directory (string): directory to save checkpoints
     log_directory (string) directory to save tensorboard logs
-    checkpoint_path(string): checkpoint path
+    checkpoint_path(string): checkpoint path for restore
     n_gpus (int): number of gpus
     rank (int): rank of current gpu
     hparams (object): comma separated list of "name=value" pairs.
     """
+
     if hparams.distributed_run:
         init_distributed(hparams, n_gpus, rank, group_name)
 
@@ -237,14 +248,13 @@ def train(
 
     if hparams.fp16_run:
         from apex import amp
-
         model, optimizer = amp.initialize(model, optimizer, opt_level="O2")
 
     if hparams.distributed_run:
         model = apply_gradient_allreduce(model)
 
-    criterion = Tacotron2Loss().cuda()
-
+    criterion_left = Tacotron2LossLeft()
+    criterion_right = Tacotron2LossRight()
     logger = prepare_directories_and_logger(
         output_directory, log_directory, rank
     )
@@ -270,6 +280,7 @@ def train(
 
     model.train()
     is_overflow = False
+
     # ================ MAIN TRAINNIG LOOP! ===================
     for epoch in range(epoch_offset, hparams.epochs):
         print("Epoch: {}".format(epoch))
@@ -281,9 +292,14 @@ def train(
 
             model.zero_grad()
             x, y = model.parse_batch(batch)
-            y_pred_t_list = model(x, teacher=True)
-            y_pred_t = y_pred_t_list[:-1]
-            loss = criterion(y_pred_t, y)
+            y_pred = model(x, teacher=True)
+            [outs_left, outs_right] = y_pred
+            y_pred_left = outs_left[0:2]
+            y_pred_right = outs_right[0:3]
+
+            loss_left = criterion_left(y_pred_left, y)
+            loss_right = criterion_right(y_pred_right, y)
+            loss = loss_left + loss_right
 
             if hparams.distributed_run:
                 reduced_loss = reduce_tensor(loss.data, n_gpus).item()
@@ -317,21 +333,29 @@ def train(
                 logger.log_training(
                     reduced_loss, grad_norm, learning_rate, duration, iteration
                 )
+                logger.log_assist(
+                    "loss for left forward decoder",
+                    loss_left.item(),
+                    iteration,
+                )
+                logger.log_assist(
+                    "loss for right forward decoder",
+                    loss_right.item(),
+                    iteration,
+                )
 
             if not is_overflow and (
                 iteration % hparams.iters_per_checkpoint == 0
             ):
-                reduced_val_loss = validate(
+                reduced_val_loss, val_loss_left, val_loss_right = validate(
                     model,
-                    criterion,
+                    criterion_left,
+                    criterion_right,
                     valset,
-                    iteration,
                     hparams.batch_size,
                     n_gpus,
                     collate_fn,
-                    logger,
                     hparams.distributed_run,
-                    rank,
                 )
 
                 if rank == 0:
@@ -341,7 +365,17 @@ def train(
                         )
                     )
                     logger.log_validation(
-                        reduced_val_loss, model, y, y_pred_t, iteration
+                        reduced_val_loss, model, y, y_pred, iteration,
+                    )
+                    logger.log_assist(
+                        "valid loss for left forward decoder",
+                        val_loss_left,
+                        iteration,
+                    )
+                    logger.log_assist(
+                        "valid loss for right forward decoder",
+                        val_loss_right,
+                        iteration,
                     )
                     checkpoint_path = os.path.join(
                         output_directory, "checkpoint_{}".format(iteration)
@@ -363,14 +397,14 @@ if __name__ == "__main__":
         "-o",
         "--output_directory",
         type=str,
-        default="/home/xdjf/checkpoints/tacotron2/exp1",
+        default="/home/server/checkpoints/tacotron2/exp4",
         help="directory to save checkpoints",
     )
     parser.add_argument(
         "-l",
         "--log_directory",
         type=str,
-        default="/home/xdjf/checkpoints/tacotron2/log/exp1",
+        default="/home/server/checkpoints/tacotron2/log/exp4",
         help="directory to save tensorboard logs",
     )
     parser.add_argument(
