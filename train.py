@@ -363,14 +363,14 @@ if __name__ == "__main__":
         "-o",
         "--output_directory",
         type=str,
-        default="/home/xdjf/checkpoints/tacotron2/exp1",
+        default="/opt/checkpoints/tacotron2/exp2",
         help="directory to save checkpoints",
     )
     parser.add_argument(
         "-l",
         "--log_directory",
         type=str,
-        default="/home/xdjf/checkpoints/tacotron2/log/exp1",
+        default="/opt/checkpoints/tacotron2/log/exp2",
         help="directory to save tensorboard logs",
     )
     parser.add_argument(
