@@ -7,6 +7,39 @@ from layers import ConvNorm, LinearNorm
 from utils import to_gpu, get_mask_from_lengths
 
 
+class HeadAttention(nn.Module):
+    def __init__(self, value_dim, key_dim):
+        super(HeadAttention, self).__init__()
+        self.K0_layer = LinearNorm(value_dim, key_dim, bias=False)
+        self.Q0_layer = LinearNorm(value_dim, key_dim, bias=False)
+        self.V0_layer = LinearNorm(value_dim, value_dim, bias=False)
+        self.feed_forward = LinearNorm(value_dim, value_dim, bias=True)
+        self.score_mask_value = -float("inf")
+
+    def forward(self, K, V, V_mask, X):
+
+        # one head, K0 (N, T, key_dim), V0 (N, T, value_dim), Q0 (N, key_dim)
+        K0 = K
+        V0 = V
+        Q0 = self.Q0_layer(X)
+
+        # energies of current step, Q0 (N, 1, key_dim), K0 (N, key_dim, T)
+        Q0 = Q0.unsqueeze(1)
+        K0 = K0.transpose(1, 2)
+        energies = torch.bmm(Q0, K0)
+        energies = energies.squeeze(1)
+
+        if V_mask is not None:
+            energies.data.masked_fill_(V_mask, self.score_mask_value)
+
+        # attention_weights (N, T), attention_context (N, value_dim)
+        attention_weights = F.softmax(energies, dim=-1)
+        attention_context = torch.bmm(attention_weights.unsqueeze(1), V0)
+        attention_context = attention_context.squeeze(1)
+        attention_context = self.feed_forward(attention_context)
+        return attention_context, attention_weights
+
+
 class LocationLayer(nn.Module):
     def __init__(
         self, attention_n_filters, attention_kernel_size, attention_dim
@@ -47,20 +80,11 @@ class Attention(nn.Module):
             attention_rnn_dim, attention_dim, bias=False, w_init_gain="tanh"
         )
 
-        self.query_aux_layer = LinearNorm(
-            attention_rnn_dim, attention_dim, bias=False, w_init_gain="tanh"
-        )
-
         self.memory_layer = LinearNorm(
             embedding_dim, attention_dim, bias=False, w_init_gain="tanh"
         )
 
-        self.memory_aux_layer = LinearNorm(
-            embedding_dim, attention_dim, bias=False, w_init_gain="tanh"
-        )
-
         self.v = LinearNorm(attention_dim, 1, bias=False)
-        self.v_aux = LinearNorm(attention_dim, 1, bias=False)
         self.location_layer = LocationLayer(
             attention_location_n_filters,
             attention_location_kernel_size,
@@ -98,14 +122,6 @@ class Attention(nn.Module):
         energies = energies.squeeze(-1)
         return energies, processed_query
 
-    def get_align_aux_energies(self, query, processed_memory):
-        processed_query_aux = self.query_aux_layer(query.unsqueeze(1))
-        energies = self.v_aux(
-            torch.tanh(processed_query_aux + processed_memory)
-        )
-        energies = energies.squeeze(-1)
-        return energies
-
     def forward(
         self,
         attention_hidden_state,
@@ -113,9 +129,6 @@ class Attention(nn.Module):
         processed_memory,
         attention_weights_cat,
         mask,
-        memory_aux,
-        processed_aux,
-        mask_aux,
     ):
         """
         PARAMS
@@ -125,7 +138,6 @@ class Attention(nn.Module):
         processed_memory: processed encoder outputs
         attention_weights_cat: previous and cummulative attention weights
         mask: binary mask for padded data
-        option: another decoder information
         """
         alignment, processed_query = self.get_alignment_energies(
             attention_hidden_state, processed_memory, attention_weights_cat
@@ -138,27 +150,7 @@ class Attention(nn.Module):
         attention_context = torch.bmm(attention_weights.unsqueeze(1), memory)
         attention_context = attention_context.squeeze(1)
 
-        if memory_aux is not None:
-            alignment_aux = self.get_align_aux_energies(
-                attention_hidden_state, processed_aux
-            )
-            if mask_aux is not None:
-                alignment_aux.data.masked_fill_(
-                    mask_aux, self.score_mask_value
-                )
-            attention_aux = F.softmax(alignment_aux, dim=1)
-            context_aux = torch.bmm(attention_aux.unsqueeze(1), memory_aux)
-            context_aux = context_aux.squeeze(1)
-            attention_context += context_aux
-        else:
-            attention_aux = None
-
-        return (
-            attention_context,
-            attention_weights,
-            processed_query,
-            attention_aux,
-        )
+        return (attention_context, attention_weights, processed_query)
 
 
 class Prenet(nn.Module):
@@ -326,6 +318,9 @@ class Decoder(nn.Module):
             self.n_frames_per_step = hparams.n_frames_left
         else:
             self.n_frames_per_step = hparams.n_frames_right
+            self.head_attention = HeadAttention(
+                hparams.n_mel_channels, hparams.key_dim
+            )
 
         self.prenet = Prenet(
             hparams.n_mel_channels * self.n_frames_per_step,
@@ -418,7 +413,9 @@ class Decoder(nn.Module):
         self.mask = mask
 
         if option is not None:
-            self.memory_aux = option[0]
+            memory_aux = option[0]
+            self.K = self.head_attention.K0_layer(memory_aux)
+            self.V = self.head_attention.V0_layer(memory_aux)
             MAX_AUX = option[0].size(1)
             if option[1] is not None:
                 mask_origin = ~get_mask_from_lengths(option[1])
@@ -426,19 +423,16 @@ class Decoder(nn.Module):
                 T_origin = mask_origin.size(1)
                 mask_aux = mask_origin.new_ones(B, T)
                 mask_aux[:, :T_origin] = mask_origin
-                self.mask_aux = mask_aux
+                self.V_mask = mask_aux
             else:
-                self.mask_aux = None
-            self.processed_aux = self.attention_layer.memory_aux_layer(
-                option[0]
-            )
+                self.V_mask = None
             self.attention_aux = Variable(
                 option[0].data.new(B, MAX_AUX).zero_()
             )
         else:
-            self.memory_aux = None
-            self.mask_aux = None
-            self.processed_aux = None
+            self.K = None
+            self.V = None
+            self.V_mask = None
             self.attention_aux = None
 
     def parse_decoder_inputs(self, decoder_inputs):
@@ -545,16 +539,12 @@ class Decoder(nn.Module):
             self.attention_context,
             self.attention_weights,
             processed_query,
-            self.attention_aux,
         ) = self.attention_layer(
             self.attention_hidden,
             self.memory,
             self.processed_memory,
             attention_weights_cat,
             self.mask,
-            self.memory_aux,
-            self.processed_aux,
-            self.mask_aux,
         )
 
         self.attention_weights_cum += self.attention_weights
@@ -576,6 +566,13 @@ class Decoder(nn.Module):
         )
 
         gate_prediction = self.gate_layer(decoder_hidden_attention_context)
+
+        if option is not None:
+            decoder_output_aux, self.attention_aux = self.head_attention(
+                self.K, self.V, self.V_mask, decoder_output
+            )
+            decoder_output += decoder_output_aux
+
         return (
             decoder_output,
             gate_prediction,
@@ -602,7 +599,7 @@ class Decoder(nn.Module):
         gate_outputs: gate outputs from the decoder
         alignments: sequence of attention weights from the decoder
         att_regular: the concatenation of query and context at each step
-        alignments_left: sequence of attention weights for option
+        alignments_aux: sequence of attention weights for option
         """
 
         decoder_input = self.get_go_frame(memory)
@@ -724,9 +721,6 @@ class Tacotron2(nn.Module):
         )
         self.encoder = Encoder(hparams)
         self.decoder_l = Decoder(hparams, "left")
-        self.linear_l2r = LinearNorm(
-            hparams.n_mel_channels, hparams.encoder_embedding_dim, bias=False
-        )
         self.decoder_r = Decoder(hparams, "right")
         self.postnet = Postnet(hparams)
 
@@ -799,7 +793,6 @@ class Tacotron2(nn.Module):
 
         # the right forward decoding
         mel_outs_l_temp = mel_outs_l.transpose(1, 2)
-        mel_outs_l_temp = self.linear_l2r(mel_outs_l_temp)
         auxiliary_info = [mel_outs_l_temp] + [output_lengths]
         (
             mel_outs_r,
