@@ -19,13 +19,13 @@ from hparams import create_hparams
 
 
 def lr_decay(learning_rate, iteration):
-    if iteration < 30000:
+    if iteration < 50000:
         lr = learning_rate
-    elif iteration < 60000:
+    elif iteration < 100000:
         lr = 5e-4
-    elif iteration < 90000:
+    elif iteration < 150000:
         lr = 3e-4
-    elif iteration < 120000:
+    elif iteration < 200000:
         lr = 1e-4
     else:
         lr = 5e-5

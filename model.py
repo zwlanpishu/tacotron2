@@ -628,7 +628,7 @@ class Decoder(nn.Module):
             att_regulars += [att_regular]
 
             if option is not None:
-                alignments_aux += attention_aux
+                alignments_aux += [attention_aux]
 
             if teacher is True:
                 decoder_input = decoder_inputs[len(mel_outputs) - 1]
@@ -798,9 +798,9 @@ class Tacotron2(nn.Module):
         )
 
         # the right forward decoding
-        mel_outs_l = mel_outs_l.transpose(1, 2)
-        mel_outs_l = self.linear_l2r(mel_outs_l)
-        auxiliary_info = [mel_outs_l] + [output_lengths]
+        mel_outs_l_temp = mel_outs_l.transpose(1, 2)
+        mel_outs_l_temp = self.linear_l2r(mel_outs_l_temp)
+        auxiliary_info = [mel_outs_l_temp] + [output_lengths]
         (
             mel_outs_r,
             gate_outs_r,
