@@ -481,7 +481,7 @@ class Decoder(nn.Module):
         self.decoder_hidden1, self.decoder_cell1 = self.decoder_rnn1(
             decoder_input, (self.decoder_hidden1, self.decoder_cell1)
         )
-        self.decoder_hidden2, self.decoder_cell2 = self.decoder_rnn1(
+        self.decoder_hidden2, self.decoder_cell2 = self.decoder_rnn2(
             self.decoder_hidden1, (self.decoder_hidden2, self.decoder_cell2)
         )
 
