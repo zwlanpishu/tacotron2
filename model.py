@@ -296,9 +296,13 @@ class Decoder(nn.Module):
             hparams.attention_location_kernel_size,
         )
 
-        self.decoder_rnn = nn.LSTMCell(
+        self.decoder_rnn1 = nn.LSTMCell(
             hparams.prenet_dim + hparams.encoder_embedding_dim,
-            hparams.decoder_rnn_dim
+            hparams.decoder_rnn_dim,
+        )
+
+        self.decoder_rnn2 = nn.LSTMCell(
+            hparams.decoder_rnn_dim, hparams.decoder_rnn_dim
         )
 
         self.linear_projection = LinearNorm(
@@ -350,10 +354,17 @@ class Decoder(nn.Module):
             memory.data.new(B, self.attention_rnn_dim).zero_()
         )
 
-        self.decoder_hidden = Variable(
+        self.decoder_hidden1 = Variable(
             memory.data.new(B, self.decoder_rnn_dim).zero_()
         )
-        self.decoder_cell = Variable(
+        self.decoder_cell1 = Variable(
+            memory.data.new(B, self.decoder_rnn_dim).zero_()
+        )
+
+        self.decoder_hidden2 = Variable(
+            memory.data.new(B, self.decoder_rnn_dim).zero_()
+        )
+        self.decoder_cell2 = Variable(
             memory.data.new(B, self.decoder_rnn_dim).zero_()
         )
 
@@ -466,12 +477,16 @@ class Decoder(nn.Module):
         self.attention_weights_cum += self.attention_weights
 
         decoder_input = torch.cat((prenet_output, self.attention_context), -1)
-        self.decoder_hidden, self.decoder_cell = self.decoder_rnn(
-            decoder_input, (self.decoder_hidden, self.decoder_cell)
+
+        self.decoder_hidden1, self.decoder_cell1 = self.decoder_rnn1(
+            decoder_input, (self.decoder_hidden1, self.decoder_cell1)
+        )
+        self.decoder_hidden2, self.decoder_cell2 = self.decoder_rnn1(
+            self.decoder_hidden1, (self.decoder_hidden2, self.decoder_cell2)
         )
 
         decoder_hidden_attention_context = torch.cat(
-            (self.decoder_hidden, self.attention_context), dim=1
+            (self.decoder_hidden2, self.attention_context), dim=1
         )
         decoder_output = self.linear_projection(
             decoder_hidden_attention_context
