@@ -124,7 +124,7 @@ class Prenet(nn.Module):
         in_sizes = [in_dim] + sizes[:-1]
         self.layers = nn.ModuleList(
             [
-                LinearNorm(in_size, out_size, bias=False)
+                LinearNorm(in_size, out_size, bias=True)
                 for (in_size, out_size) in zip(in_sizes, sizes)
             ]
         )
@@ -285,7 +285,8 @@ class Decoder(nn.Module):
         )
 
         self.attention_rnn = nn.LSTMCell(
-            hparams.prenet_dim, hparams.attention_rnn_dim,
+            hparams.prenet_dim + hparams.encoder_embedding_dim,
+            hparams.attention_rnn_dim,
         )
 
         self.attention_layer = Attention(
@@ -296,13 +297,9 @@ class Decoder(nn.Module):
             hparams.attention_location_kernel_size,
         )
 
-        self.decoder_rnn1 = nn.LSTMCell(
+        self.decoder_rnn = nn.LSTMCell(
             hparams.attention_rnn_dim + hparams.encoder_embedding_dim,
             hparams.decoder_rnn_dim,
-        )
-
-        self.decoder_rnn2 = nn.LSTMCell(
-            hparams.decoder_rnn_dim, hparams.decoder_rnn_dim
         )
 
         self.linear_projection = LinearNorm(
@@ -354,17 +351,10 @@ class Decoder(nn.Module):
             memory.data.new(B, self.attention_rnn_dim).zero_()
         )
 
-        self.decoder_hidden1 = Variable(
+        self.decoder_hidden = Variable(
             memory.data.new(B, self.decoder_rnn_dim).zero_()
         )
-        self.decoder_cell1 = Variable(
-            memory.data.new(B, self.decoder_rnn_dim).zero_()
-        )
-
-        self.decoder_hidden2 = Variable(
-            memory.data.new(B, self.decoder_rnn_dim).zero_()
-        )
-        self.decoder_cell2 = Variable(
+        self.decoder_cell = Variable(
             memory.data.new(B, self.decoder_rnn_dim).zero_()
         )
 
@@ -450,9 +440,10 @@ class Decoder(nn.Module):
         attention_weights:
         """
 
-        prenet_output = self.prenet(decoder_input)
+        decoder_input = self.prenet(decoder_input)
+        cell_input = torch.cat((decoder_input, self.attention_context), dim=-1)
         self.attention_hidden, self.attention_cell = self.attention_rnn(
-            prenet_output, (self.attention_hidden, self.attention_cell)
+            cell_input, (self.attention_hidden, self.attention_cell)
         )
 
         attention_weights_cat = torch.cat(
@@ -480,15 +471,12 @@ class Decoder(nn.Module):
             (self.attention_hidden, self.attention_context), -1
         )
 
-        self.decoder_hidden1, self.decoder_cell1 = self.decoder_rnn1(
-            decoder_input, (self.decoder_hidden1, self.decoder_cell1)
-        )
-        self.decoder_hidden2, self.decoder_cell2 = self.decoder_rnn2(
-            self.decoder_hidden1, (self.decoder_hidden2, self.decoder_cell2)
+        self.decoder_hidden, self.decoder_cell = self.decoder_rnn(
+            decoder_input, (self.decoder_hidden, self.decoder_cell)
         )
 
         decoder_hidden_attention_context = torch.cat(
-            (self.decoder_hidden2, self.attention_context), dim=1
+            (self.decoder_hidden, self.attention_context), dim=1
         )
         decoder_output = self.linear_projection(
             decoder_hidden_attention_context
