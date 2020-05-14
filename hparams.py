@@ -50,7 +50,7 @@ encoder_embedding_dim = 512
 
 # Decoder parameters
 n_frames_per_step = 1
-decoder_rnn_dim = 512
+decoder_rnn_dim = 1024
 prenet_dim = 256
 max_decoder_steps = 1000
 gate_threshold = 0.5
