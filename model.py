@@ -451,10 +451,6 @@ class Decoder(nn.Module):
         """
 
         prenet_output = self.prenet(decoder_input)
-        self.attention_hidden, self.attention_cell = self.attention_rnn(
-            prenet_output, (self.attention_hidden, self.attention_cell)
-        )
-
         attention_weights_cat = torch.cat(
             (
                 self.attention_weights.unsqueeze(1),
@@ -476,7 +472,13 @@ class Decoder(nn.Module):
         )
         self.attention_weights_cum += self.attention_weights
 
-        decoder_input = torch.cat((prenet_output, self.attention_context), -1)
+        self.attention_hidden, self.attention_cell = self.attention_rnn(
+            prenet_output, (self.attention_hidden, self.attention_cell)
+        )
+
+        decoder_input = torch.cat(
+            (self.attention_hidden, self.attention_context), -1
+        )
 
         self.decoder_hidden1, self.decoder_cell1 = self.decoder_rnn1(
             decoder_input, (self.decoder_hidden1, self.decoder_cell1)
