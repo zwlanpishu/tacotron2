@@ -297,7 +297,7 @@ class Decoder(nn.Module):
         )
 
         self.decoder_rnn1 = nn.LSTMCell(
-            hparams.prenet_dim + hparams.encoder_embedding_dim,
+            hparams.attention_rnn_dim + hparams.encoder_embedding_dim,
             hparams.decoder_rnn_dim,
         )
 

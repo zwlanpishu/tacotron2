@@ -56,7 +56,7 @@ max_decoder_steps = 1000
 gate_threshold = 0.5
 
 # Attention parameters
-attention_rnn_dim = 512
+attention_rnn_dim = 256
 attention_dim = 128
 
 # Location Layer parameters
