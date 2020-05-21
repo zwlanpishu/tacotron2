@@ -223,9 +223,9 @@ def validate(
             # evaluate the discriminator on validation dataset
             att_left = outs_left[-1]
             att_right = outs_right[-1]
-            att_num, att_len = att_left.size(0), att_left.size(1)
-            disc_label_left = torch.full((att_num, att_len, 1), 0.0).cuda()
-            disc_label_right = torch.full((att_num, att_len, 1), 1.0).cuda()
+            att_num = att_left.size(0)
+            disc_label_left = torch.full((att_num, 1), 0.0).cuda()
+            disc_label_right = torch.full((att_num, 1), 1.0).cuda()
             disc_out_left = disc_context(att_left.detach())
             disc_out_right = disc_context(att_right.detach())
             disc_loss_left = disc_criterion(disc_out_left, disc_label_left)
@@ -363,11 +363,11 @@ def train(
             # 1. load the context seq for both left and right decoder
             att_left = outs_left[-1]
             att_right = outs_right[-1]
-            att_num, att_len = att_left.size(0), att_left.size(1)
+            att_num = att_left.size(0)
 
             # 2. set real label for left decoder and right decoder
-            disc_label_left = torch.full((att_num, att_len, 1), 0.0).cuda()
-            disc_label_right = torch.full((att_num, att_len, 1), 1.0).cuda()
+            disc_label_left = torch.full((att_num, 1), 0.0).cuda()
+            disc_label_right = torch.full((att_num, 1), 1.0).cuda()
 
             # 3. train the discriminator
             disc_out_left = disc_context(att_left.detach())
@@ -433,8 +433,8 @@ def train(
                 loss.backward()
 
             # 6. train the generator to fool the discriminator (new adding)
-            disc_label_left_g = torch.full((att_num, att_len, 1), 1.0).cuda()
-            disc_label_right_g = torch.full((att_num, att_len, 1), 0.0).cuda()
+            disc_label_left_g = torch.full((att_num, 1), 1.0).cuda()
+            disc_label_right_g = torch.full((att_num, 1), 0.0).cuda()
             disc_out_left_g = disc_context(att_left)
             disc_out_right_g = disc_context(att_right)
             loss_left_g = disc_criterion(disc_out_left_g, disc_label_left_g)

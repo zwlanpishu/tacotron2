@@ -849,9 +849,12 @@ class Discriminator(nn.Module):
 
     def forward(self, input):
 
-        # (B, T, 640) ---> (B, T, 512)
-        output, _ = self.bigru(input)
+        # (B, T, 640) ---> (B, T, 512), (2, B, 256)
+        output, final_hidden = self.bigru(input)
+        final_hidden = final_hidden.permute(1, 0, 2)
+        B = final_hidden.size(0)
+        final_hidden = final_hidden.reshape(B, -1)
 
-        # (B, T, 512) ---> (B, T, 1)
+        # (B, 512) ---> (B, 1)
         output = self.project(output)
         return output
