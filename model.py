@@ -716,7 +716,7 @@ class Tacotron2(nn.Module):
                 outputs[4], output_lenlist, batch_first=True
             )
             mask_att = ~get_mask_from_lengths(output_lengths)
-            mask_att = mask_att.expand(640, mask_att.size(0), mask.mask_att(1))
+            mask_att = mask_att.expand(640, mask_att.size(0), mask_att.size(1))
             mask_att = mask_att.permute(1, 2, 0)
 
             B_att, T_att, C_att = outputs[4].size()
@@ -744,7 +744,7 @@ class Tacotron2(nn.Module):
 
             # add mask for context vector of the right decoder
             mask_att = ~get_mask_from_lengths(output_lengths)
-            mask_att = mask_att.expand(640, mask_att.size(0), mask.mask_att(1))
+            mask_att = mask_att.expand(640, mask_att.size(0), mask_att.size(1))
             mask_att = mask_att.permute(1, 2, 0)
 
             B_att, T_att, C_att = outputs[4].size()
@@ -835,16 +835,17 @@ class Tacotron2(nn.Module):
 class Discriminator(nn.Module):
     def __init__(self, in_size=640, hid_size=256, out_size=1):
         super(Discriminator, self).__init__()
-        self.bigru = nn.GRU(in_size,
-                            hid_size,
-                            batch_first=True,
-                            bidirectional=True)
-        self.project = nn.Sequential(nn.Linear(hid_size * 2, hid_size),
-                                    nn.ReLU(),
-                                    nn.Linear(hid_size, int(hid_size // 2)),
-                                    nn.ReLU(),
-                                    nn.Linear(int(hid_size // 2), out_size),
-                                    nn.Sigmoid())
+        self.bigru = nn.GRU(
+            in_size, hid_size, batch_first=True, bidirectional=True
+        )
+        self.project = nn.Sequential(
+            nn.Linear(hid_size * 2, hid_size),
+            nn.ReLU(),
+            nn.Linear(hid_size, int(hid_size // 2)),
+            nn.ReLU(),
+            nn.Linear(int(hid_size // 2), out_size),
+            nn.Sigmoid(),
+        )
 
     def forward(self, input):
 
