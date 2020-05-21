@@ -49,6 +49,8 @@ encoder_n_convolutions = 3
 encoder_embedding_dim = 512
 
 # Decoder parameters
+# Currently, only support n_frames_per_step = 1, mask_padding = true and
+# output_lengths is not None for bidrectional gan TTS's training
 n_frames_per_step = 1
 decoder_rnn_dim = 1024
 prenet_dim = 256
@@ -79,3 +81,8 @@ weight_decay = 1e-6
 grad_clip_thresh = 1.0
 batch_size = 32
 mask_padding = True
+
+# parameters for discriminator
+disc_in = 640
+disc_hid = 256
+disc_out = 1

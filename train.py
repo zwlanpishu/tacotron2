@@ -11,9 +11,9 @@ import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
 
-from model import Tacotron2
+from model import Tacotron2, Discriminator
 from data_utils import TextMelLoader, TextMelCollate
-from loss_function import Tacotron2Loss
+from loss_function import Tacotron2LossLeft, Tacotron2LossRight
 from logger import Tacotron2Logger
 import hparams
 
@@ -64,7 +64,9 @@ def prepare_dataloaders(hparams):
     # Get data, data loaders and collate function ready
     trainset = TextMelLoader(hparams.training_files, hparams)
     valset = TextMelLoader(hparams.validation_files, hparams)
-    collate_fn = TextMelCollate(hparams.n_frames_per_step)
+    collate_fn = TextMelCollate(
+        hparams.n_frames_per_step, hparams.n_frames_per_step
+    )
 
     if hparams.distributed_run:
         train_sampler = DistributedSampler(trainset)
@@ -125,7 +127,9 @@ def warm_start_model(checkpoint_path, model, ignore_layers):
     return model
 
 
-def load_checkpoint(checkpoint_path, model, optimizer):
+def load_checkpoint(
+    checkpoint_path, model, optimizer, disc_context, disc_optimizer
+):
     assert os.path.isfile(checkpoint_path)
     print("Loading checkpoint '{}'".format(checkpoint_path))
     checkpoint_dict = torch.load(checkpoint_path, map_location="cpu")
@@ -133,15 +137,34 @@ def load_checkpoint(checkpoint_path, model, optimizer):
     optimizer.load_state_dict(checkpoint_dict["optimizer"])
     learning_rate = checkpoint_dict["learning_rate"]
     iteration = checkpoint_dict["iteration"]
+
+    disc_context.load_state_dict(checkpoint_dict["state_dict_disc"])
+    disc_optimizer.load_state_dict(checkpoint_dict["optimizer_disc"])
+
     print(
         "Loaded checkpoint '{}' from iteration {}".format(
             checkpoint_path, iteration
         )
     )
-    return model, optimizer, learning_rate, iteration
+    return (
+        model,
+        optimizer,
+        learning_rate,
+        iteration,
+        disc_context,
+        disc_optimizer,
+    )
 
 
-def save_checkpoint(model, optimizer, learning_rate, iteration, filepath):
+def save_checkpoint(
+    model,
+    optimizer,
+    learning_rate,
+    iteration,
+    filepath,
+    disc_context,
+    disc_optimizer,
+):
     print(
         "Saving model and optimizer state at iteration {} to {}".format(
             iteration, filepath
@@ -153,6 +176,8 @@ def save_checkpoint(model, optimizer, learning_rate, iteration, filepath):
             "state_dict": model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "learning_rate": learning_rate,
+            "state_dict_disc": disc_context.state_dict(),
+            "optimizer_disc": disc_optimizer.state_dict(),
         },
         filepath,
     )
@@ -160,18 +185,19 @@ def save_checkpoint(model, optimizer, learning_rate, iteration, filepath):
 
 def validate(
     model,
-    criterion,
+    disc_context,
+    criterion_left,
+    criterion_right,
+    disc_criterion,
     valset,
-    iteration,
     batch_size,
     n_gpus,
     collate_fn,
-    logger,
     distributed_run,
-    rank,
 ):
     """Handles all the validation scoring and printing"""
     model.eval()
+    disc_context.eval()
     with torch.no_grad():
         val_sampler = DistributedSampler(valset) if distributed_run else None
         val_loader = DataLoader(
@@ -185,21 +211,49 @@ def validate(
         )
 
         val_loss = 0.0
+        val_loss_left = 0.0
+        val_loss_right = 0.0
+        val_disc_loss = 0.0
         for i, batch in enumerate(val_loader):
             x, y = model.parse_batch(batch)
-            y_pred_list = model(x, teacher=True)
-            y_pred = y_pred_list[:-1]
-            loss = criterion(y_pred, y)
+            [outs_left, outs_right] = model(x, teacher=True)
+            y_pred_left = outs_left[0:3]
+            y_pred_right = outs_right[0:3]
+
+            # evaluate the discriminator on validation dataset
+            att_left = outs_left[-1]
+            att_right = outs_right[-1]
+            att_num, att_len = att_left.size(0), att_left.size(1)
+            disc_label_left = torch.full((att_num, att_len, 1), 0.0).cuda()
+            disc_label_right = torch.full((att_num, att_len, 1), 1.0).cuda()
+            disc_out_left = disc_context(att_left.detach())
+            disc_out_right = disc_context(att_right.detach())
+            disc_loss_left = disc_criterion(disc_out_left, disc_label_left)
+            disc_loss_right = disc_criterion(disc_out_right, disc_label_right)
+            disc_loss = 0.5 * (disc_loss_left + disc_loss_right)
+
+            loss_left = criterion_left(y_pred_left, y)
+            loss_right = criterion_right(y_pred_right, y)
+            loss = loss_left + loss_right
+
             if distributed_run:
                 reduced_val_loss = reduce_tensor(loss.data, n_gpus).item()
             else:
                 reduced_val_loss = loss.item()
+
             val_loss += reduced_val_loss
+            val_loss_left += loss_left.item()
+            val_loss_right += loss_right.item()
+            val_disc_loss += disc_loss.item()
 
         val_loss = val_loss / (i + 1)
+        val_loss_left = val_loss_left / (i + 1)
+        val_loss_right = val_loss_right / (i + 1)
+        val_disc_loss = val_disc_loss / (i + 1)
 
     model.train()
-    return val_loss
+    disc_context.train()
+    return val_loss, val_loss_left, val_loss_right, val_disc_loss
 
 
 def train(
@@ -218,11 +272,12 @@ def train(
     ------
     output_directory (string): directory to save checkpoints
     log_directory (string) directory to save tensorboard logs
-    checkpoint_path(string): checkpoint path
+    checkpoint_path(string): checkpoint path for restore
     n_gpus (int): number of gpus
     rank (int): rank of current gpu
     hparams (object): comma separated list of "name=value" pairs.
     """
+
     if hparams.distributed_run:
         init_distributed(hparams, n_gpus, rank, group_name)
 
@@ -243,8 +298,17 @@ def train(
     if hparams.distributed_run:
         model = apply_gradient_allreduce(model)
 
-    criterion = Tacotron2Loss().cuda()
+    # 0. add a discriminator model and its optimiser
+    disc_context = Discriminator(
+        in_size=hparams.disc_in,
+        hid_size=hparams.disc_hid,
+        out_size=hparams.disc_out,
+    ).cuda()
+    disc_optimizer = torch.optim.Adam(disc_context.parameters(), lr=0.0001)
 
+    criterion_left = Tacotron2LossLeft()
+    criterion_right = Tacotron2LossRight()
+    disc_criterion = nn.BCELoss()
     logger = prepare_directories_and_logger(
         output_directory, log_directory, rank
     )
@@ -260,8 +324,15 @@ def train(
                 checkpoint_path, model, hparams.ignore_layers
             )
         else:
-            model, optimizer, _learning_rate, iteration = load_checkpoint(
-                checkpoint_path, model, optimizer
+            (
+                model,
+                optimizer,
+                _learning_rate,
+                iteration,
+                disc_context,
+                disc_optimizer,
+            ) = load_checkpoint(
+                checkpoint_path, model, optimizer, disc_context, disc_optimizer
             )
             if hparams.use_saved_learning_rate:
                 learning_rate = _learning_rate
@@ -269,7 +340,9 @@ def train(
             epoch_offset = max(0, int(iteration / len(train_loader)))
 
     model.train()
+    disc_context.train()
     is_overflow = False
+
     # ================ MAIN TRAINNIG LOOP! ===================
     for epoch in range(epoch_offset, hparams.epochs):
         print("Epoch: {}".format(epoch))
@@ -280,10 +353,74 @@ def train(
                 param_group["lr"] = learning_rate
 
             model.zero_grad()
+            disc_context.zero_grad()
             x, y = model.parse_batch(batch)
-            y_pred_t_list = model(x, teacher=True)
-            y_pred_t = y_pred_t_list[:-1]
-            loss = criterion(y_pred_t, y)
+            y_pred = model(x, teacher=True)
+            [outs_left, outs_right] = y_pred
+            y_pred_left = outs_left[0:3]
+            y_pred_right = outs_right[0:3]
+
+            # 1. load the context seq for both left and right decoder
+            att_left = outs_left[-1]
+            att_right = outs_right[-1]
+            att_num, att_len = att_left.size(0), att_left.size(1)
+
+            # 2. set real label for left decoder and right decoder
+            disc_label_left = torch.full((att_num, att_len, 1), 0.0).cuda()
+            disc_label_right = torch.full((att_num, att_len, 1), 1.0).cuda()
+
+            # 3. train the discriminator
+            disc_out_left = disc_context(att_left.detach())
+            disc_loss_left = disc_criterion(disc_out_left, disc_label_left)
+            disc_loss_left.backward()
+
+            disc_out_right = disc_context(att_right.detach())
+            disc_loss_right = disc_criterion(disc_out_right, disc_label_right)
+            disc_loss_right.backward()
+
+            # 4. update the parameters of discriminator and add log
+            disc_loss = 0.5 * (disc_loss_left + disc_loss_right)
+            logger.log_assist(
+                "loss of discriminator for each iteration",
+                float(disc_loss.item()),
+                iteration,
+            )
+
+            cmp_left = torch.ge(disc_out_left, 0.5).float()
+            res_left = torch.sum(torch.eq(cmp_left, disc_label_left)).float()
+            acc_left = res_left / float(disc_out_left.numel())
+            logger.log_assist(
+                "acc of discriminator for left decoder",
+                float(acc_left.item()),
+                iteration,
+            )
+
+            cmp_right = torch.ge(disc_out_right, 0.5).float()
+            res_right = torch.sum(
+                torch.eq(cmp_right, disc_label_right)
+            ).float()
+            acc_right = res_right / float(disc_out_right.numel())
+            logger.log_assist(
+                "acc of discriminator for right decoder",
+                float(acc_right.item()),
+                iteration,
+            )
+
+            acc = (res_left + res_right) / (
+                float(disc_out_left.numel()) + float(disc_out_right.numel())
+            )
+            logger.log_assist(
+                "acc of discriminator for each iteration",
+                float(acc.item()),
+                iteration,
+            )
+            if acc <= 0.95:
+                disc_optimizer.step()
+
+            # 5. train the generator to reconstruct the mels (original part)
+            loss_left = criterion_left(y_pred_left, y)
+            loss_right = criterion_right(y_pred_right, y)
+            loss = loss_left + loss_right
 
             if hparams.distributed_run:
                 reduced_loss = reduce_tensor(loss.data, n_gpus).item()
@@ -295,6 +432,24 @@ def train(
             else:
                 loss.backward()
 
+            # 6. train the generator to fool the discriminator (new adding)
+            disc_label_left_g = torch.full((att_num, att_len, 1), 1.0).cuda()
+            disc_label_right_g = torch.full((att_num, att_len, 1), 0.0).cuda()
+            disc_out_left_g = disc_context(att_left)
+            disc_out_right_g = disc_context(att_right)
+            loss_left_g = disc_criterion(disc_out_left_g, disc_label_left_g)
+            loss_right_g = disc_criterion(disc_out_right_g, disc_label_right_g)
+            loss_g = 0.5 * (loss_left_g + loss_right_g)
+            logger.log_assist(
+                "loss of genarator for each iteration",
+                float(loss_g.item()),
+                iteration,
+            )
+
+            # if acc >= 0.75:
+            #    loss_g.backward()
+
+            # 7. check the gradient of the model and update parameters
             if hparams.fp16_run:
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     amp.master_params(optimizer), hparams.grad_clip_thresh
@@ -304,7 +459,6 @@ def train(
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     model.parameters(), hparams.grad_clip_thresh
                 )
-
             optimizer.step()
 
             if not is_overflow and rank == 0:
@@ -317,21 +471,36 @@ def train(
                 logger.log_training(
                     reduced_loss, grad_norm, learning_rate, duration, iteration
                 )
+                logger.log_assist(
+                    "loss for left forward decoder",
+                    loss_left.item(),
+                    iteration,
+                )
+                logger.log_assist(
+                    "loss for right forward decoder",
+                    loss_right.item(),
+                    iteration,
+                )
 
             if not is_overflow and (
                 iteration % hparams.iters_per_checkpoint == 0
             ):
-                reduced_val_loss = validate(
+                (
+                    reduced_val_loss,
+                    val_loss_left,
+                    val_loss_right,
+                    val_disc_loss,
+                ) = validate(
                     model,
-                    criterion,
+                    disc_context,
+                    criterion_left,
+                    criterion_right,
+                    disc_criterion,
                     valset,
-                    iteration,
                     hparams.batch_size,
                     n_gpus,
                     collate_fn,
-                    logger,
                     hparams.distributed_run,
-                    rank,
                 )
 
                 if rank == 0:
@@ -341,8 +510,24 @@ def train(
                         )
                     )
                     logger.log_validation(
-                        reduced_val_loss, model, y, y_pred_t, iteration
+                        reduced_val_loss, model, y, y_pred, iteration,
                     )
+                    logger.log_assist(
+                        "valid loss for left forward decoder",
+                        val_loss_left,
+                        iteration,
+                    )
+                    logger.log_assist(
+                        "valid loss for right forward decoder",
+                        val_loss_right,
+                        iteration,
+                    )
+                    logger.log_assist(
+                        "valid loss for the discriminator",
+                        val_disc_loss,
+                        iteration,
+                    )
+
                     checkpoint_path = os.path.join(
                         output_directory, "checkpoint_{}".format(iteration)
                     )
@@ -352,6 +537,8 @@ def train(
                         learning_rate,
                         iteration,
                         checkpoint_path,
+                        disc_context,
+                        disc_optimizer,
                     )
 
             iteration += 1

@@ -268,7 +268,7 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, hparams):
+    def __init__(self, hparams, direction):
         super(Decoder, self).__init__()
         self.n_mel_channels = hparams.n_mel_channels
         self.n_frames_per_step = hparams.n_frames_per_step
@@ -280,6 +280,8 @@ class Decoder(nn.Module):
         self.gate_threshold = hparams.gate_threshold
         self.p_attention_dropout = hparams.p_attention_dropout
         self.p_decoder_dropout = hparams.p_decoder_dropout
+        assert direction == "left" or direction == "right"
+        self.direction = direction
 
         self.prenet = Prenet(
             hparams.n_mel_channels * hparams.n_frames_per_step,
@@ -448,7 +450,8 @@ class Decoder(nn.Module):
             cell_input, (self.attention_hidden, self.attention_cell)
         )
         self.attention_hidden = F.dropout(
-            self.attention_hidden, self.p_attention_dropout, self.training)
+            self.attention_hidden, self.p_attention_dropout, self.training
+        )
 
         attention_weights_cat = torch.cat(
             (
@@ -479,7 +482,8 @@ class Decoder(nn.Module):
             decoder_input, (self.decoder_hidden, self.decoder_cell)
         )
         self.decoder_hidden = F.dropout(
-            self.decoder_hidden, self.p_decoder_dropout, self.training)
+            self.decoder_hidden, self.p_decoder_dropout, self.training
+        )
 
         decoder_hidden_attention_context = torch.cat(
             (self.decoder_hidden, self.attention_context), dim=1
@@ -623,8 +627,10 @@ class Tacotron2(nn.Module):
         # val = sqrt(3.0) * std  # uniform bounds for std
         # self.embedding.weight.data.uniform_(-val, val)
         self.encoder = Encoder(hparams)
-        self.decoder = Decoder(hparams)
-        self.postnet = Postnet(hparams)
+        self.decoder_l = Decoder(hparams, "left")
+        self.decoder_r = Decoder(hparams, "right")
+        self.postnet_l = Postnet(hparams)
+        self.postnet_r = Postnet(hparams)
 
     def parse_batch(self, batch):
         (
@@ -637,8 +643,10 @@ class Tacotron2(nn.Module):
         text_padded = to_gpu(text_padded).long()
         input_lengths = to_gpu(input_lengths).long()
         max_len = torch.max(input_lengths.data).item()
-        mel_padded = to_gpu(mel_padded).float()
-        gate_padded = to_gpu(gate_padded).float()
+        mel_padded["left"] = to_gpu(mel_padded["left"]).float()
+        mel_padded["right"] = to_gpu(mel_padded["right"]).float()
+        gate_padded["left"] = to_gpu(gate_padded["left"]).float()
+        gate_padded["right"] = to_gpu(gate_padded["right"]).float()
         output_lengths = to_gpu(output_lengths).long()
 
         return (
@@ -646,7 +654,48 @@ class Tacotron2(nn.Module):
             (mel_padded, gate_padded),
         )
 
-    def parse_output(self, outputs, output_lengths=None):
+    def reverse_padded_sequence(self, inputs, lengths, batch_first=False):
+        """ Reverses sequences according to their lengths.
+        Inputs should have size ``T x B x *`` if ``batch_first`` is False, or
+        ``B x T x *`` if True. T is the length of the longest sequence
+        (or larger), B is the batch size, and * is any number of dimensions
+        (including 0).
+
+        Arguments:
+            inputs (Variable): padded batch of variable length sequences.
+            lengths (list[int]): list of sequence lengths
+            batch_first (bool, optional): if True, inputs should be B x T x *.
+        Returns:
+            A Variable with the same size as inputs, but with each sequence
+            reversed according to its length.
+        """
+
+        if batch_first:
+            inputs = inputs.transpose(0, 1)
+        max_length, batch_size = inputs.size(0), inputs.size(1)
+
+        if len(lengths) != batch_size:
+            raise ValueError("inputs is incompatible with lengths.")
+
+        ind = [
+            list(reversed(range(0, length))) + list(range(length, max_length))
+            for length in lengths
+        ]
+        ind = Variable(torch.LongTensor(ind).transpose(0, 1))
+
+        for dim in range(2, inputs.dim()):
+            ind = ind.unsqueeze(dim)
+        ind = ind.expand_as(inputs)
+
+        if inputs.is_cuda:
+            ind = ind.cuda(inputs.get_device())
+
+        reversed_inputs = torch.gather(inputs, 0, ind)
+        if batch_first:
+            reversed_inputs = reversed_inputs.transpose(0, 1)
+        return reversed_inputs
+
+    def parse_output_left(self, outputs, output_lengths=None):
         if self.mask_padding and output_lengths is not None:
             mask = ~get_mask_from_lengths(output_lengths + 1)
             mask = mask.expand(self.n_mel_channels, mask.size(0), mask.size(1))
@@ -661,6 +710,48 @@ class Tacotron2(nn.Module):
             outputs[1].data.masked_fill_(mask_padded, 0.0)
             outputs[2].data.masked_fill_(mask_padded[:, 0, :], 1e3)
 
+            # add mask for context vector of the left decoder
+            output_lenlist = output_lengths.cpu().numpy().tolist()
+            outputs[4] = self.reverse_padded_sequence(
+                outputs[4], output_lenlist, batch_first=True
+            )
+            mask_att = ~get_mask_from_lengths(output_lengths)
+            mask_att = mask_att.expand(640, mask_att.size(0), mask.mask_att(1))
+            mask_att = mask_att.permute(1, 2, 0)
+
+            B_att, T_att, C_att = outputs[4].size()
+            T_att_m = mask_att.size(1)
+            mask_att_padded = mask_att.new_ones(B_att, T_att, C_att)
+            mask_att_padded[:, :T_att_m, :] = mask_att
+            outputs[4].data.masked_fill_(mask_att_padded, 0.0)
+
+        return outputs
+
+    def parse_output_right(self, outputs, output_lengths=None):
+        if self.mask_padding and output_lengths is not None:
+            mask = ~get_mask_from_lengths(output_lengths + 1)
+            mask = mask.expand(self.n_mel_channels, mask.size(0), mask.size(1))
+            mask = mask.permute(1, 0, 2)
+
+            B, C, T = outputs[0].size()
+            T_m = mask.size(2)
+            mask_padded = mask.new_ones(B, C, T)
+            mask_padded[:, :, :T_m] = mask
+
+            outputs[0].data.masked_fill_(mask_padded, 0.0)
+            outputs[1].data.masked_fill_(mask_padded, 0.0)
+            outputs[2].data.masked_fill_(mask_padded[:, 0, :], 1e3)
+
+            # add mask for context vector of the right decoder
+            mask_att = ~get_mask_from_lengths(output_lengths)
+            mask_att = mask_att.expand(640, mask_att.size(0), mask.mask_att(1))
+            mask_att = mask_att.permute(1, 2, 0)
+
+            B_att, T_att, C_att = outputs[4].size()
+            T_att_m = mask_att.size(1)
+            mask_att_padded = mask_att.new_ones(B_att, T_att, C_att)
+            mask_att_padded[:, :T_att_m, :] = mask_att
+            outputs[4].data.masked_fill_(mask_att_padded, 0.0)
         return outputs
 
     def forward(self, inputs, teacher=True):
@@ -671,26 +762,49 @@ class Tacotron2(nn.Module):
 
         encoder_outputs = self.encoder(embedded_inputs, text_lengths)
 
-        mel_outputs, gate_outputs, alignments, att_regulars = self.decoder(
+        # the left forward decoding
+        mel_outs_l, gate_outs_l, aligns_l, att_regulars_l = self.decoder_l(
             encoder_outputs,
-            mels,
+            mels["left"],
             memory_lengths=text_lengths,
             teacher=teacher,
         )
 
-        mel_outputs_postnet = self.postnet(mel_outputs)
-        mel_outputs_postnet = mel_outputs + mel_outputs_postnet
+        # the right forward decoding
+        mel_outs_r, gate_outs_r, aligns_r, att_regulars_r = self.decoder_r(
+            encoder_outputs,
+            mels["right"],
+            memory_lengths=text_lengths,
+            teacher=teacher,
+        )
 
-        return self.parse_output(
+        # the post process
+        mel_outputs_postnet_l = self.postnet_l(mel_outs_l)
+        mel_outputs_postnet_l = mel_outs_l + mel_outputs_postnet_l
+        mel_outputs_postnet_r = self.postnet_r(mel_outs_r)
+        mel_outputs_postnet_r = mel_outs_r + mel_outputs_postnet_r
+
+        outputs_left = self.parse_output_left(
             [
-                mel_outputs,
-                mel_outputs_postnet,
-                gate_outputs,
-                alignments,
-                att_regulars,
+                mel_outs_l,
+                mel_outputs_postnet_l,
+                gate_outs_l,
+                aligns_l,
+                att_regulars_l,
             ],
             output_lengths,
         )
+        outputs_right = self.parse_output_right(
+            [
+                mel_outs_r,
+                mel_outputs_postnet_r,
+                gate_outs_r,
+                aligns_r,
+                att_regulars_r,
+            ],
+            output_lengths,
+        )
+        return outputs_left, outputs_right
 
     def inference(self, inputs):
         embedded_inputs = self.embedding(inputs).transpose(1, 2)
@@ -716,3 +830,27 @@ class Tacotron2(nn.Module):
         )
 
         return outputs
+
+
+class Discriminator(nn.Module):
+    def __init__(self, in_size=640, hid_size=256, out_size=1):
+        super(Discriminator, self).__init__()
+        self.bigru = nn.GRU(in_size,
+                            hid_size,
+                            batch_first=True,
+                            bidirectional=True)
+        self.project = nn.Sequential(nn.Linear(hid_size * 2, hid_size),
+                                    nn.ReLU(),
+                                    nn.Linear(hid_size, int(hid_size // 2)),
+                                    nn.ReLU(),
+                                    nn.Linear(int(hid_size // 2), out_size),
+                                    nn.Sigmoid())
+
+    def forward(self, input):
+
+        # (B, T, 640) ---> (B, T, 512)
+        output, _ = self.bigru(input)
+
+        # (B, T, 512) ---> (B, T, 1)
+        output = self.project(output)
+        return output
