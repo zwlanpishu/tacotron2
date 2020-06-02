@@ -6,7 +6,7 @@ from tqdm import tqdm
 import torch
 from torch.utils.data import DataLoader
 
-from hparams import create_hparams
+import hparams
 from train import load_model
 from data_utils import TextMelLoader, TextMelCollate
 
@@ -90,6 +90,5 @@ if __name__ == "__main__":
     os.makedirs(args.output_infer, exist_ok=True)
     assert args.checkpoint_path is not None
 
-    hparams = create_hparams()
     main(args, hparams)
     print("finished")
