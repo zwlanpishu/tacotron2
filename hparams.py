@@ -20,9 +20,9 @@ ignore_layers = ["embedding.weight"]
 # Data Parameters             #
 ################################
 load_mel_from_disk = False
-training_files = "filelists/ljs_audio_text_train_filelist.txt"
-validation_files = "filelists/ljs_audio_text_val_filelist.txt"
-test_files = "filelists/ljs_audio_text_test_filelist.txt"
+training_files = "filelists/biaobei_audio_text_train_filelist.txt"
+validation_files = "filelists/biaobei_audio_text_val_filelist.txt"
+test_files = "filelists/biaobei_audio_text_test_filelist.txt"
 text_cleaners = ["english_cleaners"]
 
 ################################
@@ -49,7 +49,7 @@ encoder_n_convolutions = 3
 encoder_embedding_dim = 512
 
 # Decoder parameters
-n_frames_per_step = 1
+n_frames_per_step = 2
 decoder_rnn_dim = 1024
 prenet_dim = 256
 max_decoder_steps = 1000
