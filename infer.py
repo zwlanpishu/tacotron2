@@ -19,6 +19,7 @@ def plot_data(data, index, path, figsize=(16, 4)):
         )
     file = os.path.join(path, str(index) + ".png")
     plt.savefig(file)
+    plt.close()
 
 
 def main(args, hparams):
