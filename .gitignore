@@ -3,3 +3,4 @@ venv/
 __pycache__/
 text/__pycache__/
 output_infer/
+tacotron2_temp/
