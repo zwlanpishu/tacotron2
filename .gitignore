@@ -1,5 +1,4 @@
 venv/
 .vscode/
 __pycache__/
-text/__pycache__/
-output_infer/
+output_infer*/

@@ -1,34 +1,34 @@
-from text import symbols
-
-
 ################################
 # Experiment Parameters        #
 ################################
-epochs = 500
+epochs = 2000
 iters_per_checkpoint = 1000
 seed = 1234
-dynamic_loss_scaling = True
-fp16_run = False
-distributed_run = False
-dist_backend = "nccl"
-dist_url = "tcp://localhost:54321"
 cudnn_enabled = True
 cudnn_benchmark = False
-ignore_layers = ["embedding.weight"]
+trans_type = "phn"
 
 ################################
 # Data Parameters             #
 ################################
-load_mel_from_disk = False
-training_files = "filelists/ljs_audio_text_train_filelist.txt"
-validation_files = "filelists/ljs_audio_text_val_filelist.txt"
-test_files = "filelists/ljs_audio_text_test_filelist.txt"
-text_cleaners = ["english_cleaners"]
+load_mel_from_disk = True
+data_files = "filelists/data.csv"
+training_files = "filelists/train_set.csv"
+validation_files = "filelists/dev_set.csv"
+test_files = "filelists/test_set.csv"
+custom_files = "filelists/custom_set.csv"
+dump = "/home/server/disk1/DATA/LJS/LJSpeech-1.1/wavs"
 
 ################################
 # Audio Parameters             #
 ################################
-max_wav_value = 32768.0
+
+# if use tacotron 1's feature normalization
+tacotron1_norm = False
+preemphasis = 0.97
+ref_level_db = 20.0
+min_level_db = -100.0
+
 sampling_rate = 22050
 filter_length = 1024
 hop_length = 256
@@ -40,7 +40,7 @@ mel_fmax = 8000.0
 ################################
 # Model Parameters             #
 ################################
-n_symbols = len(symbols)
+n_symbols = 35 if trans_type == "char" else 78
 symbols_embedding_dim = 512
 
 # Encoder parameters
@@ -49,13 +49,14 @@ encoder_n_convolutions = 3
 encoder_embedding_dim = 512
 
 # Decoder parameters
-n_frames_per_step = 1
+n_frames_per_step = 2
 decoder_rnn_dim = 1024
 prenet_dim = 256
 max_decoder_steps = 1000
 gate_threshold = 0.5
 p_attention_dropout = 0.1
 p_decoder_dropout = 0.1
+infer_trim = 2
 
 # Attention parameters
 attention_rnn_dim = 1024
@@ -73,9 +74,9 @@ postnet_n_convolutions = 5
 ################################
 # Optimization Hyperparameters #
 ################################
-use_saved_learning_rate = False
 learning_rate = 1e-3
 weight_decay = 1e-6
 grad_clip_thresh = 1.0
 batch_size = 32
+accum_size = 1
 mask_padding = True
